@@ -109,13 +109,26 @@ st.markdown("""
 import requests
 
 def get_current_price(symbol: str):
-    """Récupère le prix actuel via l'API publique Binance (sans authentification)"""
+    """Récupère le prix via CoinGecko API (alternative gratuite)"""
     try:
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        # Convertir BTCUSDT → bitcoin, ETHUSDT → ethereum, etc.
+        symbol_map = {
+            "BTCUSDT": "bitcoin",
+            "ETHUSDT": "ethereum",
+            "BNBUSDT": "binancecoin",
+            # Ajoutez vos symboles ici
+        }
+
+        coin_id = symbol_map.get(symbol)
+        if not coin_id:
+            return None
+
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
         response = requests.get(url, timeout=5)
+
         if response.status_code == 200:
             data = response.json()
-            return float(data['price'])
+            return float(data[coin_id]['usd'])
         return None
     except Exception:
         return None
