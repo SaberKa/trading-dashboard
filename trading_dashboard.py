@@ -11,6 +11,10 @@ import requests
 # =============================
 st.set_page_config(page_title="Crypto Portfolio Dashboard", layout="wide", initial_sidebar_state="expanded")
 
+# Éviter les erreurs de cache Plotly
+import plotly.io as pio
+pio.templates.default = "plotly_white"
+
 # =============================
 # CSS personnalisé pour un design moderne
 # =============================
