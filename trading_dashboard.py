@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 import numpy as np
+import requests
 
 # =============================
 # Configuration de la page
@@ -104,46 +105,63 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================
-# Import fonction prix (API publique)
+# Import fonction prix (CoinGecko API)
 # =============================
-import requests
+
+# Cache global pour les prix
+PRICE_CACHE = {}
 
 
-def get_current_price(symbol: str):
-    """Récupère le prix actuel via l'API publique Binance (sans authentification)"""
+def fetch_all_prices_coingecko():
+    """Récupère tous les prix en une seule requête"""
+    global PRICE_CACHE
+
+    # Liste de tous les coins à récupérer
+    coin_ids = [
+        "bitcoin", "ethereum", "binancecoin", "cardano", "solana",
+        "ripple", "dogecoin", "chainlink", "tron", "stellar"
+    ]
+
     try:
-        # Nettoyage du symbole (au cas où il y aurait des espaces ou caractères bizarres)
-        clean_symbol = symbol.strip().upper()
-
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={clean_symbol}"
-
-        # DEBUG - Afficher dans la sidebar
-        with st.sidebar:
-            st.write(f"🔍 Recherche: {clean_symbol}")
-            st.write(f"📡 URL: {url}")
-
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(coin_ids)}&vs_currencies=usd"
         response = requests.get(url, timeout=10)
-
-        with st.sidebar:
-            st.write(f"📊 Status: {response.status_code}")
 
         if response.status_code == 200:
             data = response.json()
-            price = float(data['price'])
 
-            with st.sidebar:
-                st.write(f"✅ Prix: ${price}")
+            # Mapping inverse : coin_id -> symboles Binance
+            mapping = {
+                "bitcoin": ["BTCUSDT", "BTCUSDC"],
+                "ethereum": ["ETHUSDT", "ETHUSDC"],
+                "binancecoin": ["BNBUSDT", "BNBUSDC"],
+                "cardano": ["ADAUSDT", "ADAUSDC"],
+                "solana": ["SOLUSDT", "SOLUSDC"],
+                "ripple": ["XRPUSDT", "XRPUSDC"],
+                "dogecoin": ["DOGEUSDT", "DOGEUSDC"],
+                "chainlink": ["LINKUSDT", "LINKUSDC"],
+                "tron": ["TRXUSDT", "TRXUSDC"],
+                "stellar": ["XLMUSDT", "XLMUSDC"],
+            }
 
-            return price
-        else:
-            with st.sidebar:
-                st.write(f"❌ Réponse: {response.text[:200]}")
-            return None
+            # Remplir le cache
+            for coin_id, symbols in mapping.items():
+                if coin_id in data and 'usd' in data[coin_id]:
+                    price = float(data[coin_id]['usd'])
+                    for symbol in symbols:
+                        PRICE_CACHE[symbol] = price
 
+            return True
     except Exception as e:
-        with st.sidebar:
-            st.write(f"❌ Erreur: {str(e)}")
-        return None
+        return False
+
+    return False
+
+
+def get_current_price(symbol: str):
+    """Récupère le prix depuis le cache"""
+    clean_symbol = symbol.strip().upper()
+    return PRICE_CACHE.get(clean_symbol)
+
 
 # =============================
 # Cache Prix avec fallback USDT/USDC
@@ -612,6 +630,10 @@ except Exception as e:
 with st.spinner("Calcul des métriques..."):
     realized_pnl = calculate_pnl_fifo(df)
     open_positions = get_open_positions(df)
+
+    # Charger tous les prix en une seule fois
+    fetch_all_prices_coingecko()
+
     open_positions_enriched = enrich_with_live_prices(open_positions)
     trading_stats = calculate_trading_stats(realized_pnl)
     buy_hold_stats = calculate_buy_and_hold(df, open_positions_enriched)
