@@ -21,3 +21,4 @@ datetime,symbol,action,quantity,price,mode,confiance
 2025-10-28 20:52:06,DOGEUSDC,buy,5075.0,0.19681,simulation,0.78
 2025-10-28 21:20:18,XRPUSDC,buy,384.3,2.5991,simulation,0.78
 2025-10-29 02:14:39,ETHUSDC,buy,0.0376,3977.53,simulation,0.78
+2025-10-29 20:23:53,TESTUSDC,buy,1.0,100.0,simulation,0.99
