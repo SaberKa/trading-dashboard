@@ -108,31 +108,42 @@ st.markdown("""
 # =============================
 import requests
 
+
 def get_current_price(symbol: str):
-    """Récupère le prix via CoinGecko API (alternative gratuite)"""
+    """Récupère le prix actuel via l'API publique Binance (sans authentification)"""
     try:
-        # Convertir BTCUSDT → bitcoin, ETHUSDT → ethereum, etc.
-        symbol_map = {
-            "BTCUSDT": "bitcoin",
-            "ETHUSDT": "ethereum",
-            "BNBUSDT": "binancecoin",
-            # Ajoutez vos symboles ici
-        }
+        # Nettoyage du symbole (au cas où il y aurait des espaces ou caractères bizarres)
+        clean_symbol = symbol.strip().upper()
 
-        coin_id = symbol_map.get(symbol)
-        if not coin_id:
-            return None
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={clean_symbol}"
 
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-        response = requests.get(url, timeout=5)
+        # DEBUG - Afficher dans la sidebar
+        with st.sidebar:
+            st.write(f"🔍 Recherche: {clean_symbol}")
+            st.write(f"📡 URL: {url}")
+
+        response = requests.get(url, timeout=10)
+
+        with st.sidebar:
+            st.write(f"📊 Status: {response.status_code}")
 
         if response.status_code == 200:
             data = response.json()
-            return float(data[coin_id]['usd'])
-        return None
-    except Exception:
-        return None
+            price = float(data['price'])
 
+            with st.sidebar:
+                st.write(f"✅ Prix: ${price}")
+
+            return price
+        else:
+            with st.sidebar:
+                st.write(f"❌ Réponse: {response.text[:200]}")
+            return None
+
+    except Exception as e:
+        with st.sidebar:
+            st.write(f"❌ Erreur: {str(e)}")
+        return None
 
 # =============================
 # Cache Prix avec fallback USDT/USDC
