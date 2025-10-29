@@ -104,12 +104,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =============================
-# Import fonction prix
+# Import fonction prix (API publique)
 # =============================
-try:
-    from binance_fct import get_current_price
-except Exception:
-    def get_current_price(symbol: str):
+import requests
+
+def get_current_price(symbol: str):
+    """Récupère le prix actuel via l'API publique Binance (sans authentification)"""
+    try:
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return float(data['price'])
+        return None
+    except Exception:
         return None
 
 
