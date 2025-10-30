@@ -48,6 +48,10 @@ st.markdown("""
         background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
     }
 
+    .metric-card-info {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
     /* Titres */
     h1 {
         color: #1f2937;
@@ -511,12 +515,12 @@ def calculate_trading_stats(realized_pnl: pd.DataFrame) -> dict:
 
 
 # =============================
-# Buy & Hold Evolution temporelle
+# Buy & Hold Evolution temporelle (CORRIGÉ)
 # =============================
 def calculate_bh_evolution(trades_df: pd.DataFrame, realized_pnl: pd.DataFrame) -> pd.DataFrame:
     """
     Calcule l'évolution du PnL Buy & Hold dans le temps.
-    Pour chaque date de trade, simule le fait de garder toutes les positions achetées.
+    Pour chaque symbole, prend le PREMIER achat et simule de le garder jusqu'à maintenant.
     """
     if trades_df.empty:
         return pd.DataFrame()
@@ -528,6 +532,17 @@ def calculate_bh_evolution(trades_df: pd.DataFrame, realized_pnl: pd.DataFrame) 
 
     # S'assurer que datetime est bien un datetime
     buys["datetime"] = pd.to_datetime(buys["datetime"], errors='coerce')
+
+    # Pour chaque symbole, identifier le premier achat
+    first_buys = {}
+    for symbol in buys["symbol"].unique():
+        symbol_buys = buys[buys["symbol"] == symbol].sort_values("datetime")
+        first_buy = symbol_buys.iloc[0]
+        first_buys[symbol] = {
+            "quantity": first_buy["quantity"],
+            "price": first_buy["price"],
+            "date": first_buy["datetime"]
+        }
 
     # Créer une timeline avec toutes les dates de trades réalisés
     if realized_pnl.empty:
@@ -542,30 +557,24 @@ def calculate_bh_evolution(trades_df: pd.DataFrame, realized_pnl: pd.DataFrame) 
     bh_evolution = []
 
     for date in dates:
-        # Tous les achats effectués avant cette date
-        past_buys = buys[buys["datetime"] <= date].copy()
-
-        if past_buys.empty:
-            continue
-
         total_cost = 0
         total_value = 0
 
-        for _, buy in past_buys.iterrows():
-            symbol = buy["symbol"]
-            qty = buy["quantity"]
-            price_buy = buy["price"]
+        # Pour chaque symbole dont le premier achat est avant cette date
+        for symbol, first_buy_info in first_buys.items():
+            if first_buy_info["date"] <= date:
+                qty = first_buy_info["quantity"]
+                price_buy = first_buy_info["price"]
 
-            # Prix actuel (au moment de la date)
-            # Pour simplifier, on utilise le prix actuel du marché
-            price_now = price_cache.get_with_fallback(symbol)
+                # Prix actuel (au moment de la date)
+                price_now = price_cache.get_with_fallback(symbol)
 
-            if price_now is not None:
-                cost = qty * price_buy
-                value = qty * price_now
+                if price_now is not None:
+                    cost = qty * price_buy
+                    value = qty * price_now
 
-                total_cost += cost
-                total_value += value
+                    total_cost += cost
+                    total_value += value
 
         if total_cost > 0:
             pnl = total_value - total_cost
@@ -587,13 +596,13 @@ def calculate_bh_evolution(trades_df: pd.DataFrame, realized_pnl: pd.DataFrame) 
 # =============================
 def calculate_buy_and_hold(trades_df: pd.DataFrame) -> dict:
     """
-    Calcule la performance Buy & Hold basée sur TOUS les achats historiques.
-    Simulation: "Si j'avais acheté et JAMAIS vendu, quelle serait ma performance?"
+    Calcule la performance Buy & Hold basée sur le PREMIER achat de chaque symbole.
+    Simulation: "Si j'avais acheté lors du premier trade de chaque crypto et JAMAIS vendu"
     """
     if trades_df.empty:
         return {"total_cost": 0, "total_value": 0, "total_pnl": 0, "total_pct": 0, "per_symbol": {}}
 
-    # Récupérer TOUS les achats (même ceux qui ont été vendus)
+    # Récupérer TOUS les achats
     all_buys = trades_df[trades_df["action"] == "buy"].copy()
 
     if all_buys.empty:
@@ -603,32 +612,35 @@ def calculate_buy_and_hold(trades_df: pd.DataFrame) -> dict:
     total_value = 0
     per_symbol = {}
 
-    # Grouper par symbole
+    # Pour chaque symbole, prendre uniquement le PREMIER achat
     for symbol in all_buys["symbol"].unique():
-        symbol_buys = all_buys[all_buys["symbol"] == symbol]
+        symbol_buys = all_buys[all_buys["symbol"] == symbol].sort_values("datetime")
 
-        # Somme de toutes les quantités et coûts
-        total_qty = symbol_buys["quantity"].sum()
-        symbol_cost = (symbol_buys["quantity"] * symbol_buys["price"]).sum()
+        # PREMIER achat uniquement
+        first_buy = symbol_buys.iloc[0]
+        first_qty = first_buy["quantity"]
+        first_price = first_buy["price"]
+        first_cost = first_qty * first_price
 
         # Prix actuel
         current_price = price_cache.get_with_fallback(symbol)
 
-        if current_price is not None and symbol_cost > 0:
-            symbol_value = total_qty * current_price
-            symbol_pnl = symbol_value - symbol_cost
-            symbol_pct = (symbol_pnl / symbol_cost * 100)
+        if current_price is not None and first_cost > 0:
+            symbol_value = first_qty * current_price
+            symbol_pnl = symbol_value - first_cost
+            symbol_pct = (symbol_pnl / first_cost * 100)
 
-            total_cost += symbol_cost
+            total_cost += first_cost
             total_value += symbol_value
 
             per_symbol[symbol] = {
-                "cost": float(symbol_cost),
+                "cost": float(first_cost),
                 "value": float(symbol_value),
                 "pnl": float(symbol_pnl),
                 "pct": float(symbol_pct),
-                "quantity": float(total_qty),
-                "current_price": float(current_price)
+                "quantity": float(first_qty),
+                "current_price": float(current_price),
+                "first_buy_date": first_buy["datetime"]
             }
 
     total_pnl = total_value - total_cost
@@ -641,6 +653,100 @@ def calculate_buy_and_hold(trades_df: pd.DataFrame) -> dict:
         "total_pct": float(total_pct),
         "per_symbol": per_symbol
     }
+
+
+# =============================
+# NOUVEAU : Tableau de Bord Risque
+# =============================
+def calculate_risk_metrics(open_positions_enriched: pd.DataFrame, initial_capital: float) -> dict:
+    """Calcule les métriques de risque du portfolio"""
+    if open_positions_enriched.empty:
+        return {
+            "total_exposure": 0,
+            "capital_invested": 0,
+            "capital_available": initial_capital,
+            "largest_position_pct": 0,
+            "largest_position_symbol": None,
+            "num_positions": 0,
+            "concentration_index": 0,
+            "allocation": {}
+        }
+
+    # Agréger par symbole
+    summary = open_positions_enriched.groupby("symbol").agg({
+        "value_$": "sum",
+        "cost_$": "sum"
+    }).reset_index()
+
+    total_value = summary["value_$"].sum()
+    total_cost = summary["cost_$"].sum()
+
+    # Plus grosse position
+    largest = summary.loc[summary["value_$"].idxmax()]
+    largest_pct = (largest["value_$"] / total_value * 100) if total_value > 0 else 0
+
+    # Allocation par crypto
+    allocation = {}
+    for _, row in summary.iterrows():
+        pct = (row["value_$"] / total_value * 100) if total_value > 0 else 0
+        allocation[row["symbol"]] = {
+            "value": float(row["value_$"]),
+            "percentage": float(pct)
+        }
+
+    # Index de concentration Herfindahl (0-10000, plus c'est élevé plus c'est concentré)
+    percentages = [alloc["percentage"] for alloc in allocation.values()]
+    herfindahl = sum(p ** 2 for p in percentages)
+
+    # Capital disponible (simplifié)
+    num_symbols = len(summary)
+    capital_available = initial_capital * num_symbols - total_cost
+
+    return {
+        "total_exposure": float(total_value),
+        "capital_invested": float(total_cost),
+        "capital_available": float(capital_available),
+        "largest_position_pct": float(largest_pct),
+        "largest_position_symbol": largest["symbol"],
+        "num_positions": len(summary),
+        "concentration_index": float(herfindahl),
+        "allocation": allocation
+    }
+
+
+# =============================
+# NOUVEAU : Waterfall Chart Data
+# =============================
+def prepare_waterfall_data(realized_pnl: pd.DataFrame, open_positions_enriched: pd.DataFrame) -> dict:
+    """Prépare les données pour le waterfall chart"""
+    data = {"symbols": [], "realized": [], "latent": [], "total": []}
+
+    # PnL réalisé par symbole
+    if not realized_pnl.empty:
+        realized_by_symbol = realized_pnl.groupby("symbol")["pnl_$"].sum()
+    else:
+        realized_by_symbol = pd.Series(dtype=float)
+
+    # PnL latent par symbole
+    if not open_positions_enriched.empty and open_positions_enriched["pnl_live_$"].notna().any():
+        latent_by_symbol = open_positions_enriched.groupby("symbol")["pnl_live_$"].sum()
+    else:
+        latent_by_symbol = pd.Series(dtype=float)
+
+    # Combiner tous les symboles
+    all_symbols = set(realized_by_symbol.index) | set(latent_by_symbol.index)
+
+    for symbol in sorted(all_symbols):
+        realized = realized_by_symbol.get(symbol, 0)
+        latent = latent_by_symbol.get(symbol, 0)
+        total = realized + latent
+
+        data["symbols"].append(symbol)
+        data["realized"].append(float(realized))
+        data["latent"].append(float(latent))
+        data["total"].append(float(total))
+
+    return data
 
 
 # =============================
@@ -737,8 +843,14 @@ with st.spinner("Calcul des métriques..."):
 
     open_positions_enriched = enrich_with_live_prices(open_positions)
     trading_stats = calculate_trading_stats(realized_pnl)
-    buy_hold_stats = calculate_buy_and_hold(df)  # CORRIGÉ: prend maintenant tous les achats
+    buy_hold_stats = calculate_buy_and_hold(df)
     bh_evolution = calculate_bh_evolution(df, realized_pnl)
+
+    # NOUVEAU : Métriques de risque
+    risk_metrics = calculate_risk_metrics(open_positions_enriched, initial_capital)
+
+    # NOUVEAU : Données waterfall
+    waterfall_data = prepare_waterfall_data(realized_pnl, open_positions_enriched)
 
 # Debug des quantités recalculées
 if recalc_qty:
@@ -810,6 +922,58 @@ with tab1:
             )
         else:
             display_metric_card("Valeur Portfolio", "$0.00", card_type="neutral")
+
+    st.markdown("---")
+
+    # =============================
+    # NOUVEAU : WATERFALL CHART
+    # =============================
+    st.subheader("💧 Contribution par Crypto au PnL Total")
+
+    if waterfall_data["symbols"]:
+        fig_waterfall = go.Figure()
+
+        # Créer les barres empilées
+        fig_waterfall.add_trace(go.Bar(
+            name="PnL Réalisé",
+            x=waterfall_data["symbols"],
+            y=waterfall_data["realized"],
+            marker_color=['#10b981' if x > 0 else '#ef4444' for x in waterfall_data["realized"]]
+        ))
+
+        fig_waterfall.add_trace(go.Bar(
+            name="PnL Latent",
+            x=waterfall_data["symbols"],
+            y=waterfall_data["latent"],
+            marker_color=['#3b82f6' if x > 0 else '#f59e0b' for x in waterfall_data["latent"]]
+        ))
+
+        fig_waterfall.update_layout(
+            barmode='relative',
+            xaxis_title="",
+            yaxis_title="PnL ($)",
+            hovermode='x unified',
+            height=400,
+            template="plotly_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+
+        fig_waterfall.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+
+        st.plotly_chart(fig_waterfall, use_container_width=True)
+
+        # Tableau récapitulatif
+        waterfall_df = pd.DataFrame({
+            "Crypto": waterfall_data["symbols"],
+            "PnL Réalisé ($)": [format_currency(x) for x in waterfall_data["realized"]],
+            "PnL Latent ($)": [format_currency(x) for x in waterfall_data["latent"]],
+            "PnL Total ($)": [format_currency(x) for x in waterfall_data["total"]]
+        })
+
+        with st.expander("📋 Voir le détail des contributions"):
+            st.dataframe(waterfall_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Aucune donnée disponible pour le waterfall chart")
 
     st.markdown("---")
 
@@ -908,15 +1072,15 @@ with tab1:
         # Texte explicatif
         st.caption("""
         📌 **Légende:**
-        - 🔵 **Trading Actif**: Votre stratégie avec achats/ventes
-        - 🟡 **Buy & Hold**: Si vous aviez gardé TOUS vos achats sans JAMAIS vendre
+        - 🔵 **Trading Actif**: Votre stratégie avec achats/ventes et réinvestissement
+        - 🟡 **Buy & Hold**: Si vous aviez acheté lors du PREMIER achat de chaque crypto et JAMAIS vendu
         """)
 
-    # Comparaison avec Buy & Hold
+    # Comparaison avec Buy & Hold (CORRIGÉ AVEC ROI SUR CAPITAL INITIAL)
     st.markdown("---")
     st.subheader("🔄 Comparaison avec Buy & Hold")
     st.caption(
-        "Comparaison entre votre stratégie de trading et une stratégie Buy & Hold passive (garder tous les achats)")
+        "Comparaison entre votre stratégie de trading et une stratégie Buy & Hold (acheter au premier trade de chaque crypto et garder)")
 
     col1, col2, col3 = st.columns(3)
 
@@ -946,25 +1110,127 @@ with tab1:
         )
 
     with col3:
-        if buy_hold_stats["total_cost"] > 0:
-            bh_roi = buy_hold_stats["total_pct"]
+        # CORRIGÉ : ROI sur capital initial
+        # Nombre de symboles tradés
+        num_symbols_traded = len(df["symbol"].unique())
+        total_initial_capital = initial_capital * num_symbols_traded
 
-            # ROI du trading
-            total_cost_realized = float(realized_pnl["cost_$"].sum()) if not realized_pnl.empty else 0
-            total_cost_open = float(open_positions_enriched["cost_$"].sum()) if not open_positions_enriched.empty else 0
-            total_cost = total_cost_realized + total_cost_open
+        bh_roi = buy_hold_stats["total_pct"]
+        trading_roi = (trading_pnl / total_initial_capital * 100) if total_initial_capital > 0 else 0
 
-            trading_roi = (trading_pnl / total_cost * 100) if total_cost > 0 else 0
+        roi_diff = trading_roi - bh_roi
+        roi_type = "positive" if roi_diff > 0 else "negative" if roi_diff < 0 else "neutral"
 
-            roi_diff = trading_roi - bh_roi
-            roi_type = "positive" if roi_diff > 0 else "negative" if roi_diff < 0 else "neutral"
+        display_metric_card(
+            "Différence ROI",
+            format_percentage(roi_diff),
+            f"Trading: {format_percentage(trading_roi)} | B&H: {format_percentage(bh_roi)}",
+            card_type=roi_type
+        )
 
+    # =============================
+    # NOUVEAU : TABLEAU DE BORD RISQUE
+    # =============================
+    st.markdown("---")
+    st.subheader("⚠️ Tableau de Bord Risque Actuel")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        display_metric_card(
+            "Exposition Totale",
+            format_currency(risk_metrics["total_exposure"]),
+            f"Capital investi: {format_currency(risk_metrics['capital_invested'])}",
+            card_type="info"
+        )
+
+    with col2:
+        display_metric_card(
+            "Nombre de Positions",
+            str(risk_metrics["num_positions"]),
+            f"Cryptos différentes",
+            card_type="info"
+        )
+
+    with col3:
+        if risk_metrics["largest_position_symbol"]:
             display_metric_card(
-                "Différence ROI",
-                format_percentage(roi_diff),
-                f"Trading: {format_percentage(trading_roi)} | B&H: {format_percentage(bh_roi)}",
-                card_type=roi_type
+                "Plus Grosse Position",
+                f"{risk_metrics['largest_position_pct']:.1f}%",
+                f"{risk_metrics['largest_position_symbol']}",
+                card_type="info"
             )
+        else:
+            display_metric_card(
+                "Plus Grosse Position",
+                "N/A",
+                card_type="neutral"
+            )
+
+    with col4:
+        # Interprétation de l'index de concentration
+        hhi = risk_metrics["concentration_index"]
+        if hhi < 1500:
+            concentration_label = "Bien diversifié"
+            conc_type = "positive"
+        elif hhi < 2500:
+            concentration_label = "Diversification moyenne"
+            conc_type = "neutral"
+        else:
+            concentration_label = "Très concentré"
+            conc_type = "negative"
+
+        display_metric_card(
+            "Index de Concentration",
+            f"{hhi:.0f}",
+            concentration_label,
+            card_type=conc_type
+        )
+
+    # Graphique d'allocation
+    if risk_metrics["allocation"]:
+        st.markdown("### 📊 Allocation Actuelle du Portfolio")
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            # Pie chart
+            symbols = list(risk_metrics["allocation"].keys())
+            values = [risk_metrics["allocation"][s]["value"] for s in symbols]
+            percentages = [risk_metrics["allocation"][s]["percentage"] for s in symbols]
+
+            fig_allocation = go.Figure(data=[go.Pie(
+                labels=symbols,
+                values=values,
+                textposition='inside',
+                textinfo='percent',  # Affiche seulement le %
+                hovertemplate='<b>%{label}</b><br>Valeur: $%{value:,.0f}<br>Part: %{percent}<extra></extra>',
+                hole=0.4,
+                marker=dict(
+                    colors=['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'])
+            )])
+
+            fig_allocation.update_layout(
+                title="",
+                height=400,
+                template="plotly_white",
+                showlegend=True
+            )
+
+            st.plotly_chart(fig_allocation, use_container_width=True)
+
+        with col2:
+            st.markdown("#### Répartition")
+            allocation_df = pd.DataFrame([
+                {
+                    "Crypto": symbol,
+                    "Valeur": format_currency(data["value"]),
+                    "% Portfolio": f"{data['percentage']:.1f}%"
+                }
+                for symbol, data in risk_metrics["allocation"].items()
+            ]).sort_values("% Portfolio", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
+
+            st.dataframe(allocation_df, use_container_width=True, hide_index=True)
 
 # =============================
 # TAB 2: POSITIONS OUVERTES
@@ -1083,7 +1349,7 @@ with tab2:
         st.info("Aucune position ouverte actuellement.")
 
 # =============================
-# TAB 3: POSITIONS FERMÉES (NOUVEAU)
+# TAB 3: POSITIONS FERMÉES
 # =============================
 with tab3:
     st.subheader("🔒 Positions Fermées (Trades Réalisés)")
@@ -1306,7 +1572,7 @@ with tab3:
         st.info("Aucune position fermée pour le moment.")
 
 # =============================
-# TAB 4: VUE PAR CRYPTO
+# TAB 4: VUE PAR CRYPTO (AMÉLIORÉ AVEC B&H ET ROI CORRIGÉ)
 # =============================
 with tab4:
     st.subheader("🔍 Analyse par Crypto")
@@ -1321,6 +1587,170 @@ with tab4:
         symbol_open = open_positions_enriched[open_positions_enriched[
                                                   "symbol"] == selected_symbol].copy() if not open_positions_enriched.empty else pd.DataFrame()
 
+        # =============================
+        # NOUVEAU : Comparaison avec B&H pour cette crypto (ROI SUR CAPITAL INITIAL)
+        # =============================
+        st.markdown("---")
+        st.subheader(f"🎯 Performance Trading vs Buy & Hold - {selected_symbol}")
+
+        # Calculer le PnL trading (réalisé + latent) pour cette crypto
+        symbol_realized_pnl = float(symbol_realized["pnl_$"].sum()) if not symbol_realized.empty else 0
+        symbol_latent_pnl = float(symbol_open["pnl_live_$"].sum()) if not symbol_open.empty and symbol_open[
+            "pnl_live_$"].notna().any() else 0
+        symbol_trading_pnl = symbol_realized_pnl + symbol_latent_pnl
+
+        # CORRIGÉ : Calculer le VRAI B&H - Premier achat et on garde jusqu'à maintenant
+        symbol_trades = df[df["symbol"] == selected_symbol].copy()
+        symbol_buys = symbol_trades[symbol_trades["action"] == "buy"].sort_values("datetime")
+
+        has_bh_data = False
+        symbol_bh_pnl = 0
+        symbol_bh_cost = 0
+        symbol_bh_value = 0
+        symbol_bh_pct = 0
+        first_buy_date = None
+        first_buy_qty = 0
+        first_buy_price = 0
+
+        if not symbol_buys.empty:
+            # Prendre le PREMIER achat (le plus ancien)
+            first_buy = symbol_buys.iloc[0]
+            first_buy_date = first_buy["datetime"]
+            first_buy_qty = float(first_buy["quantity"])
+            first_buy_price = float(first_buy["price"])
+            first_buy_cost = first_buy_qty * first_buy_price
+
+            # Prix actuel
+            current_price = price_cache.get_with_fallback(selected_symbol)
+
+            if current_price is not None:
+                # Valeur si on avait gardé depuis le premier achat
+                symbol_bh_cost = first_buy_cost
+                symbol_bh_value = first_buy_qty * current_price
+                symbol_bh_pnl = symbol_bh_value - symbol_bh_cost
+                symbol_bh_pct = (symbol_bh_pnl / symbol_bh_cost * 100) if symbol_bh_cost > 0 else 0
+                has_bh_data = True
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            card_type = "positive" if symbol_trading_pnl > 0 else "negative" if symbol_trading_pnl < 0 else "neutral"
+
+            # CORRIGÉ : ROI trading = PnL / Capital initial (qui tourne)
+            symbol_trading_roi = (symbol_trading_pnl / initial_capital * 100) if initial_capital > 0 else 0
+
+            display_metric_card(
+                "PnL Trading",
+                format_currency(symbol_trading_pnl),
+                format_percentage(symbol_trading_roi),
+                card_type=card_type
+            )
+
+        with col2:
+            if has_bh_data:
+                bh_type = "positive" if symbol_bh_pnl > 0 else "negative" if symbol_bh_pnl < 0 else "neutral"
+                display_metric_card(
+                    "PnL Buy & Hold",
+                    format_currency(symbol_bh_pnl),
+                    format_percentage(symbol_bh_pct),
+                    card_type=bh_type
+                )
+            else:
+                display_metric_card("PnL Buy & Hold", "N/A", "Aucun achat historique", card_type="neutral")
+
+        with col3:
+            if has_bh_data:
+                diff = symbol_trading_pnl - symbol_bh_pnl
+                diff_type = "positive" if diff > 0 else "negative" if diff < 0 else "neutral"
+                display_metric_card(
+                    "Différence ($)",
+                    format_currency(diff),
+                    "Meilleur" if diff > 0 else "Moins bon" if diff < 0 else "Égal",
+                    card_type=diff_type
+                )
+            else:
+                display_metric_card("Différence ($)", "N/A", card_type="neutral")
+
+        with col4:
+            if has_bh_data:
+                roi_diff = symbol_trading_roi - symbol_bh_pct
+                roi_type = "positive" if roi_diff > 0 else "negative" if roi_diff < 0 else "neutral"
+                display_metric_card(
+                    "Différence ROI",
+                    format_percentage(roi_diff),
+                    card_type=roi_type
+                )
+            else:
+                display_metric_card("Différence ROI", "N/A", card_type="neutral")
+
+        # Graphique de comparaison
+        if has_bh_data:
+            st.markdown("#### 📊 Comparaison Visuelle")
+
+            fig_compare = go.Figure()
+
+            categories = ['Trading (Réalisé + Latent)', 'Buy & Hold (Depuis 1er achat)']
+            pnl_values = [symbol_trading_pnl, symbol_bh_pnl]
+            colors = ['#3b82f6', '#f59e0b']
+
+            fig_compare.add_trace(go.Bar(
+                x=categories,
+                y=pnl_values,
+                marker_color=colors,
+                text=[format_currency(v) for v in pnl_values],
+                textposition='outside'
+            ))
+
+            fig_compare.update_layout(
+                title=f"PnL Comparé - {selected_symbol}",
+                yaxis_title="PnL ($)",
+                height=350,
+                template="plotly_white",
+                showlegend=False
+            )
+
+            fig_compare.add_hline(y=0, line_dash="dot", line_color="gray")
+
+            st.plotly_chart(fig_compare, use_container_width=True)
+
+            # Tableau détaillé
+            with st.expander("🔍 Détail des calculs"):
+                st.markdown(f"""
+                **Trading (Réalisé + Latent) :**
+                - Capital initial : {format_currency(initial_capital)}
+                - PnL Réalisé : {format_currency(symbol_realized_pnl)}
+                - PnL Latent : {format_currency(symbol_latent_pnl)}
+                - **Total PnL : {format_currency(symbol_trading_pnl)}** ({format_percentage(symbol_trading_roi)} ROI)
+
+                **Buy & Hold (Premier achat uniquement) :**
+                - Date du premier achat : {first_buy_date.strftime('%Y-%m-%d %H:%M:%S') if first_buy_date else 'N/A'}
+                - Capital initial : {format_currency(initial_capital)}
+                - Quantité achetée : {first_buy_qty:.6f} {selected_symbol.replace('USDT', '').replace('USDC', '')}
+                - Prix d'achat : {format_currency(first_buy_price)}
+                - Coût initial : {format_currency(symbol_bh_cost)}
+                - Prix actuel : {format_currency(current_price) if 'current_price' in locals() and current_price else 'N/A'}
+                - Valeur actuelle : {format_currency(symbol_bh_value)}
+                - **PnL B&H : {format_currency(symbol_bh_pnl)}** ({format_percentage(symbol_bh_pct)} ROI)
+
+                ℹ️ *Le B&H simule : "J'achète lors du premier trade avec {format_currency(initial_capital)} et je ne vends JAMAIS"*
+                ℹ️ *Le Trading réinvestit le même capital initial ({format_currency(initial_capital)}) à chaque cycle*
+                """)
+
+            # Analyse textuelle
+            if symbol_trading_pnl > symbol_bh_pnl:
+                st.success(
+                    f"🎉 **Votre stratégie de trading performe mieux que Buy & Hold sur {selected_symbol}** avec une différence de {format_currency(symbol_trading_pnl - symbol_bh_pnl)} ({format_percentage(roi_diff)} de ROI supplémentaire)")
+            elif symbol_trading_pnl < symbol_bh_pnl:
+                st.warning(
+                    f"⚠️ **Buy & Hold aurait été plus performant sur {selected_symbol}** avec une différence de {format_currency(symbol_bh_pnl - symbol_trading_pnl)} ({format_percentage(-roi_diff)} de ROI en plus)")
+            else:
+                st.info(f"➡️ **Votre stratégie de trading est équivalente à Buy & Hold sur {selected_symbol}**")
+
+        st.caption(
+            "💡 **Note :** Le Buy & Hold compare comme si vous aviez acheté lors de votre tout premier trade sur cette crypto avec le même capital initial et que vous n'aviez JAMAIS vendu depuis.")
+
+        st.markdown("---")
+
         # Métriques du symbole
         col1, col2, col3, col4 = st.columns(4)
 
@@ -1329,24 +1759,24 @@ with tab4:
                 pnl = float(symbol_realized["pnl_$"].sum())
                 card_type = "positive" if pnl > 0 else "negative" if pnl < 0 else "neutral"
                 display_metric_card(
-                    f"PnL Réalisé {selected_symbol}",
+                    f"PnL Réalisé",
                     format_currency(pnl),
                     card_type=card_type
                 )
             else:
-                display_metric_card(f"PnL Réalisé {selected_symbol}", "$0.00", card_type="neutral")
+                display_metric_card(f"PnL Réalisé", "$0.00", card_type="neutral")
 
         with col2:
             if not symbol_open.empty and symbol_open["pnl_live_$"].notna().any():
                 latent = float(symbol_open["pnl_live_$"].sum())
                 card_type = "positive" if latent > 0 else "negative" if latent < 0 else "neutral"
                 display_metric_card(
-                    f"PnL Latent {selected_symbol}",
+                    f"PnL Latent",
                     format_currency(latent),
                     card_type=card_type
                 )
             else:
-                display_metric_card(f"PnL Latent {selected_symbol}", "$0.00", card_type="neutral")
+                display_metric_card(f"PnL Latent", "$0.00", card_type="neutral")
 
         with col3:
             if not symbol_realized.empty:
@@ -1364,18 +1794,15 @@ with tab4:
                 display_metric_card("Win Rate", "N/A", card_type="neutral")
 
         with col4:
-            bh_symbol = buy_hold_stats["per_symbol"].get(selected_symbol)
-            if bh_symbol:
-                bh_pnl = bh_symbol["pnl"]
-                bh_type = "positive" if bh_pnl > 0 else "negative" if bh_pnl < 0 else "neutral"
+            if not symbol_open.empty and symbol_open["value_$"].notna().any():
+                value = float(symbol_open["value_$"].sum())
                 display_metric_card(
-                    f"B&H {selected_symbol}",
-                    format_currency(bh_pnl),
-                    format_percentage(bh_symbol["pct"]),
-                    card_type=bh_type
+                    "Valeur Position",
+                    format_currency(value),
+                    card_type="info"
                 )
             else:
-                display_metric_card(f"B&H {selected_symbol}", "N/A", card_type="neutral")
+                display_metric_card("Valeur Position", "$0.00", card_type="neutral")
 
         st.markdown("---")
 
@@ -1385,15 +1812,6 @@ with tab4:
             symbol_realized["is_stop"] = symbol_realized["confiance"].apply(
                 lambda x: True if pd.notna(x) and float(x) == 0.0 else False
             )
-
-            # DEBUG: Afficher les détails des calculs
-            with st.expander("🔍 Debug - Détails des calculs"):
-                st.write("**Trades réalisés (brut) :**")
-                debug_df = symbol_realized[
-                    ["datetime", "quantity", "price_buy", "price_sell", "cost_$", "pnl_$"]].copy()
-                st.dataframe(debug_df, use_container_width=True)
-                st.write(f"**Somme PnL:** ${symbol_realized['pnl_$'].sum():.2f}")
-                st.write(f"**Nombre de trades:** {len(symbol_realized)}")
 
             # Graphique des trades
             fig = make_subplots(
@@ -1645,6 +2063,6 @@ with tab5:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #6b7280; font-size: 0.85rem; padding: 1rem;'>
-    Dashboard Crypto Portfolio v2.2 | Buy & Hold calculé sur tous les achats historiques
+    Dashboard Crypto Portfolio v3.2 | ROI calculé sur le capital initial (même $1000 qui tourne)
 </div>
 """, unsafe_allow_html=True)
