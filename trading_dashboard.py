@@ -13,6 +13,7 @@ st.set_page_config(page_title="Crypto Portfolio Dashboard", layout="wide", initi
 
 # Éviter les erreurs de cache Plotly
 import plotly.io as pio
+
 pio.templates.default = "plotly_white"
 
 # =============================
@@ -266,7 +267,11 @@ def recalculate_quantities_with_reinvestment(trades_df: pd.DataFrame,
 @st.cache_data(show_spinner=False)
 def load_trades(path: str, recalculate_qty: bool = True, initial_capital: float = 1000.0) -> pd.DataFrame:
     """Charge et nettoie le fichier des trades"""
-    df = pd.read_csv(path, parse_dates=["datetime"], dayfirst=True)
+    df = pd.read_csv(path)
+
+    # Parser les dates avec format mixte et dayfirst=True
+    df["datetime"] = pd.to_datetime(df["datetime"], format='mixed', dayfirst=True, errors='coerce')
+
     df = df.sort_values("datetime").reset_index(drop=True)
 
     # Nettoyage et typage
@@ -473,13 +478,20 @@ def calculate_trading_stats(realized_pnl: pd.DataFrame) -> dict:
 
     # Durée moyenne des trades (en jours)
     if "buy_date" in realized_pnl.columns:
-        realized_pnl_copy = realized_pnl.copy()
-        # S'assurer que les colonnes sont bien en datetime avec format mixte
-        realized_pnl_copy["datetime"] = pd.to_datetime(realized_pnl_copy["datetime"], format='mixed', dayfirst=True)
-        realized_pnl_copy["buy_date"] = pd.to_datetime(realized_pnl_copy["buy_date"], format='mixed', dayfirst=True)
-        realized_pnl_copy["holding_period"] = (realized_pnl_copy["datetime"] - realized_pnl_copy[
-            "buy_date"]).dt.total_seconds() / 86400
-        avg_holding = realized_pnl_copy["holding_period"].mean()
+        try:
+            realized_pnl_copy = realized_pnl.copy()
+            # S'assurer que les colonnes sont bien en datetime
+            realized_pnl_copy["datetime"] = pd.to_datetime(realized_pnl_copy["datetime"], errors='coerce')
+            realized_pnl_copy["buy_date"] = pd.to_datetime(realized_pnl_copy["buy_date"], errors='coerce')
+
+            # Calculer la durée en jours
+            realized_pnl_copy["holding_period"] = (
+                                                          realized_pnl_copy["datetime"] - realized_pnl_copy["buy_date"]
+                                                  ).dt.total_seconds() / 86400
+
+            avg_holding = realized_pnl_copy["holding_period"].mean()
+        except Exception:
+            avg_holding = None
     else:
         avg_holding = None
 
@@ -496,6 +508,78 @@ def calculate_trading_stats(realized_pnl: pd.DataFrame) -> dict:
         "max_drawdown": max_drawdown,
         "avg_holding_days": avg_holding
     }
+
+
+# =============================
+# Buy & Hold Evolution temporelle
+# =============================
+def calculate_bh_evolution(trades_df: pd.DataFrame, realized_pnl: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcule l'évolution du PnL Buy & Hold dans le temps.
+    Pour chaque date de trade, simule le fait de garder toutes les positions achetées.
+    """
+    if trades_df.empty:
+        return pd.DataFrame()
+
+    # Récupérer tous les achats
+    buys = trades_df[trades_df["action"] == "buy"].copy()
+    if buys.empty:
+        return pd.DataFrame()
+
+    # S'assurer que datetime est bien un datetime
+    buys["datetime"] = pd.to_datetime(buys["datetime"], errors='coerce')
+
+    # Créer une timeline avec toutes les dates de trades réalisés
+    if realized_pnl.empty:
+        dates = [buys["datetime"].max()]
+    else:
+        realized_pnl_copy = realized_pnl.copy()
+        realized_pnl_copy["datetime"] = pd.to_datetime(realized_pnl_copy["datetime"], errors='coerce')
+        dates = sorted(realized_pnl_copy["datetime"].unique())
+        # Ajouter la date actuelle
+        dates.append(pd.Timestamp(datetime.now()))
+
+    bh_evolution = []
+
+    for date in dates:
+        # Tous les achats effectués avant cette date
+        past_buys = buys[buys["datetime"] <= date].copy()
+
+        if past_buys.empty:
+            continue
+
+        total_cost = 0
+        total_value = 0
+
+        for _, buy in past_buys.iterrows():
+            symbol = buy["symbol"]
+            qty = buy["quantity"]
+            price_buy = buy["price"]
+
+            # Prix actuel (au moment de la date)
+            # Pour simplifier, on utilise le prix actuel du marché
+            price_now = price_cache.get_with_fallback(symbol)
+
+            if price_now is not None:
+                cost = qty * price_buy
+                value = qty * price_now
+
+                total_cost += cost
+                total_value += value
+
+        if total_cost > 0:
+            pnl = total_value - total_cost
+            bh_evolution.append({
+                "datetime": date,
+                "bh_cost": total_cost,
+                "bh_value": total_value,
+                "bh_pnl": pnl
+            })
+
+    if not bh_evolution:
+        return pd.DataFrame()
+
+    return pd.DataFrame(bh_evolution)
 
 
 # =============================
@@ -641,6 +725,7 @@ with st.spinner("Calcul des métriques..."):
     open_positions_enriched = enrich_with_live_prices(open_positions)
     trading_stats = calculate_trading_stats(realized_pnl)
     buy_hold_stats = calculate_buy_and_hold(df, open_positions_enriched)
+    bh_evolution = calculate_bh_evolution(df, realized_pnl)
 
 # Debug des quantités recalculées
 if recalc_qty:
@@ -654,7 +739,8 @@ if recalc_qty:
 # =============================
 # ONGLETS PRINCIPAUX
 # =============================
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Vue Globale", "💹 Positions Ouvertes", "📈 Par Crypto", "📉 Statistiques"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📊 Vue Globale", "💹 Positions Ouvertes", "🔒 Positions Fermées", "📈 Par Crypto", "📉 Statistiques"])
 
 # =============================
 # TAB 1: VUE GLOBALE
@@ -714,26 +800,26 @@ with tab1:
 
     st.markdown("---")
 
-    # Graphique d'évolution du PnL
+    # Graphique d'évolution du PnL - AVEC BUY & HOLD
     if not realized_pnl.empty:
-        st.subheader("📈 Évolution du PnL")
+        st.subheader("📈 Comparaison Trading vs Buy & Hold")
 
         fig = make_subplots(specs=[[{"secondary_y": False}]])
 
-        # PnL cumulé réalisé
+        # PnL cumulé réalisé (Trading actif)
         fig.add_trace(
             go.Scatter(
                 x=realized_pnl["datetime"],
                 y=realized_pnl["global_cum_pnl_$"],
                 mode="lines",
-                name="PnL Réalisé Cumulé",
+                name="Trading Actif",
                 line=dict(color="#3b82f6", width=3),
                 fill='tozeroy',
                 fillcolor='rgba(59, 130, 246, 0.1)'
             )
         )
 
-        # Point actuel (réalisé + latent)
+        # Point actuel trading (réalisé + latent)
         if not open_positions_enriched.empty and open_positions_enriched["pnl_live_$"].notna().any():
             last_realized = float(realized_pnl["global_cum_pnl_$"].iloc[-1])
             last_date = realized_pnl["datetime"].max()
@@ -746,21 +832,48 @@ with tab1:
                     x=[last_date, datetime.now()],
                     y=[last_realized, current_total],
                     mode="lines",
-                    name="Projection avec latent",
-                    line=dict(color="#10b981", width=2, dash="dash"),
+                    name="Trading (projection)",
+                    line=dict(color="#3b82f6", width=2, dash="dash"),
+                    showlegend=False
                 )
             )
 
-            # Point actuel
+            # Point actuel trading
             fig.add_trace(
                 go.Scatter(
                     x=[datetime.now()],
                     y=[current_total],
                     mode="markers+text",
-                    name="PnL Total Actuel",
-                    marker=dict(size=15, color="#10b981", symbol="diamond"),
-                    text=["Maintenant"],
+                    name="Trading Maintenant",
+                    marker=dict(size=15, color="#3b82f6", symbol="diamond"),
+                    text=["Trading"],
                     textposition="top center",
+                )
+            )
+
+        # Évolution Buy & Hold
+        if not bh_evolution.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=bh_evolution["datetime"],
+                    y=bh_evolution["bh_pnl"],
+                    mode="lines",
+                    name="Buy & Hold",
+                    line=dict(color="#f59e0b", width=3, dash="dot"),
+                )
+            )
+
+            # Point actuel B&H
+            current_bh = bh_evolution.iloc[-1]["bh_pnl"]
+            fig.add_trace(
+                go.Scatter(
+                    x=[bh_evolution.iloc[-1]["datetime"]],
+                    y=[current_bh],
+                    mode="markers+text",
+                    name="B&H Maintenant",
+                    marker=dict(size=15, color="#f59e0b", symbol="diamond"),
+                    text=["B&H"],
+                    textposition="bottom center",
                 )
             )
 
@@ -778,6 +891,13 @@ with tab1:
         )
 
         st.plotly_chart(fig, use_container_width=True)
+
+        # Texte explicatif
+        st.caption("""
+        📌 **Légende:**
+        - 🔵 **Trading Actif**: Votre stratégie avec achats/ventes
+        - 🟡 **Buy & Hold**: Si vous aviez gardé tous vos achats sans jamais vendre
+        """)
 
     # Comparaison avec Buy & Hold
     st.markdown("---")
@@ -950,9 +1070,232 @@ with tab2:
         st.info("Aucune position ouverte actuellement.")
 
 # =============================
-# TAB 3: VUE PAR CRYPTO
+# TAB 3: POSITIONS FERMÉES (NOUVEAU)
 # =============================
 with tab3:
+    st.subheader("🔒 Positions Fermées (Trades Réalisés)")
+
+    if not realized_pnl.empty:
+        # Statistiques globales des positions fermées
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            total_trades = len(realized_pnl)
+            display_metric_card(
+                "Nombre de Trades",
+                str(total_trades),
+                card_type="info"
+            )
+
+        with col2:
+            total_pnl_closed = float(realized_pnl["pnl_$"].sum())
+            pnl_type = "positive" if total_pnl_closed > 0 else "negative" if total_pnl_closed < 0 else "neutral"
+            display_metric_card(
+                "PnL Total Fermé",
+                format_currency(total_pnl_closed),
+                card_type=pnl_type
+            )
+
+        with col3:
+            winning = len(realized_pnl[realized_pnl["pnl_$"] > 0])
+            win_rate = (winning / total_trades * 100) if total_trades > 0 else 0
+            wr_type = "positive" if win_rate >= 50 else "negative"
+            display_metric_card(
+                "Win Rate",
+                f"{win_rate:.1f}%",
+                f"{winning} gagnants",
+                card_type=wr_type
+            )
+
+        with col4:
+            avg_pnl = float(realized_pnl["pnl_$"].mean())
+            avg_type = "positive" if avg_pnl > 0 else "negative" if avg_pnl < 0 else "neutral"
+            display_metric_card(
+                "PnL Moyen/Trade",
+                format_currency(avg_pnl),
+                card_type=avg_type
+            )
+
+        st.markdown("---")
+
+        # Graphique: Évolution cumulative des positions fermées
+        st.subheader("📈 Évolution des Positions Fermées")
+
+        fig_closed = go.Figure()
+
+        fig_closed.add_trace(go.Scatter(
+            x=realized_pnl["datetime"],
+            y=realized_pnl["global_cum_pnl_$"],
+            mode="lines+markers",
+            name="PnL Cumulé",
+            line=dict(color="#10b981", width=2),
+            marker=dict(size=6),
+            fill='tozeroy',
+            fillcolor='rgba(16, 185, 129, 0.1)'
+        ))
+
+        fig_closed.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5)
+
+        fig_closed.update_layout(
+            xaxis_title="Date",
+            yaxis_title="PnL Cumulé ($)",
+            hovermode='x unified',
+            height=400,
+            template="plotly_white"
+        )
+
+        st.plotly_chart(fig_closed, use_container_width=True)
+
+        st.markdown("---")
+
+        # Tableau détaillé des positions fermées
+        st.subheader("📋 Historique Complet des Trades")
+
+        # Préparer les données pour l'affichage
+        display_realized = realized_pnl.copy()
+
+        # Identifier les stop loss
+        display_realized["is_stop"] = display_realized["confiance"].apply(
+            lambda x: True if pd.notna(x) and float(x) == 0.0 else False
+        )
+
+        # Sélectionner et renommer les colonnes
+        display_cols = display_realized[
+            ["datetime", "symbol", "quantity", "price_buy", "price_sell", "cost_$", "pnl_$", "pnl_%", "is_stop",
+             "buy_date"]
+        ].copy()
+
+        display_cols.columns = ["Date Vente", "Symbole", "Quantité", "Prix Achat", "Prix Vente",
+                                "Coût ($)", "PnL ($)", "PnL (%)", "Stop Loss", "Date Achat"]
+
+        # Formatage
+        display_cols["Quantité"] = display_cols["Quantité"].apply(lambda x: f"{x:.6f}".rstrip('0').rstrip('.'))
+        for col in ["Prix Achat", "Prix Vente", "Coût ($)", "PnL ($)"]:
+            display_cols[col] = display_cols[col].apply(lambda x: f"${x:,.2f}")
+        display_cols["PnL (%)"] = display_cols["PnL (%)"].apply(lambda x: f"{x:+.2f}%")
+        display_cols["Stop Loss"] = display_cols["Stop Loss"].apply(lambda x: "✓" if x else "")
+
+        # Réorganiser les colonnes
+        final_cols = ["Date Vente", "Symbole", "Quantité", "Date Achat", "Prix Achat",
+                      "Prix Vente", "Coût ($)", "PnL ($)", "PnL (%)", "Stop Loss"]
+        display_cols = display_cols[final_cols]
+
+        # Filtres interactifs
+        col_filter1, col_filter2 = st.columns(2)
+
+        with col_filter1:
+            symbols_filter = st.multiselect(
+                "Filtrer par symbole",
+                options=sorted(realized_pnl["symbol"].unique()),
+                default=[]
+            )
+
+        with col_filter2:
+            result_filter = st.selectbox(
+                "Filtrer par résultat",
+                options=["Tous", "Gagnants uniquement", "Perdants uniquement", "Stop Loss uniquement"]
+            )
+
+        # Appliquer les filtres
+        filtered_realized = realized_pnl.copy()
+
+        if symbols_filter:
+            filtered_realized = filtered_realized[filtered_realized["symbol"].isin(symbols_filter)]
+
+        if result_filter == "Gagnants uniquement":
+            filtered_realized = filtered_realized[filtered_realized["pnl_$"] > 0]
+        elif result_filter == "Perdants uniquement":
+            filtered_realized = filtered_realized[filtered_realized["pnl_$"] < 0]
+        elif result_filter == "Stop Loss uniquement":
+            filtered_realized["is_stop"] = filtered_realized["confiance"].apply(
+                lambda x: True if pd.notna(x) and float(x) == 0.0 else False
+            )
+            filtered_realized = filtered_realized[filtered_realized["is_stop"] == True]
+
+        # Refaire le formatage pour les données filtrées
+        if not filtered_realized.empty:
+            filtered_display = filtered_realized.copy()
+            filtered_display["is_stop"] = filtered_display["confiance"].apply(
+                lambda x: True if pd.notna(x) and float(x) == 0.0 else False
+            )
+
+            filtered_display_cols = filtered_display[
+                ["datetime", "symbol", "quantity", "price_buy", "price_sell", "cost_$", "pnl_$", "pnl_%", "is_stop",
+                 "buy_date"]
+            ].copy()
+
+            filtered_display_cols.columns = ["Date Vente", "Symbole", "Quantité", "Prix Achat", "Prix Vente",
+                                             "Coût ($)", "PnL ($)", "PnL (%)", "Stop Loss", "Date Achat"]
+
+            filtered_display_cols["Quantité"] = filtered_display_cols["Quantité"].apply(
+                lambda x: f"{x:.6f}".rstrip('0').rstrip('.'))
+            for col in ["Prix Achat", "Prix Vente", "Coût ($)", "PnL ($)"]:
+                filtered_display_cols[col] = filtered_display_cols[col].apply(lambda x: f"${x:,.2f}")
+            filtered_display_cols["PnL (%)"] = filtered_display_cols["PnL (%)"].apply(lambda x: f"{x:+.2f}%")
+            filtered_display_cols["Stop Loss"] = filtered_display_cols["Stop Loss"].apply(lambda x: "✓" if x else "")
+
+            filtered_display_cols = filtered_display_cols[final_cols]
+
+            st.dataframe(filtered_display_cols, use_container_width=True, hide_index=True)
+
+            st.caption(f"**{len(filtered_display_cols)}** trades affichés")
+        else:
+            st.info("Aucun trade ne correspond aux filtres sélectionnés.")
+
+        # Répartition par crypto
+        st.markdown("---")
+        st.subheader("📊 Répartition des Trades par Crypto")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Nombre de trades par crypto
+            trades_per_symbol = realized_pnl.groupby("symbol").size().reset_index(name="Nombre")
+            trades_per_symbol = trades_per_symbol.sort_values("Nombre", ascending=False)
+
+            fig_trades = go.Figure(data=[go.Bar(
+                x=trades_per_symbol["symbol"],
+                y=trades_per_symbol["Nombre"],
+                marker_color='#3b82f6'
+            )])
+            fig_trades.update_layout(
+                title="Nombre de Trades par Crypto",
+                xaxis_title="",
+                yaxis_title="Nombre",
+                height=350,
+                template="plotly_white"
+            )
+            st.plotly_chart(fig_trades, use_container_width=True)
+
+        with col2:
+            # PnL total par crypto
+            pnl_per_symbol = realized_pnl.groupby("symbol")["pnl_$"].sum().reset_index()
+            pnl_per_symbol = pnl_per_symbol.sort_values("pnl_$", ascending=False)
+
+            colors = ['#10b981' if x > 0 else '#ef4444' for x in pnl_per_symbol["pnl_$"]]
+
+            fig_pnl = go.Figure(data=[go.Bar(
+                x=pnl_per_symbol["symbol"],
+                y=pnl_per_symbol["pnl_$"],
+                marker_color=colors
+            )])
+            fig_pnl.update_layout(
+                title="PnL Total par Crypto",
+                xaxis_title="",
+                yaxis_title="PnL ($)",
+                height=350,
+                template="plotly_white"
+            )
+            fig_pnl.add_hline(y=0, line_dash="dot", line_color="gray")
+            st.plotly_chart(fig_pnl, use_container_width=True)
+
+    else:
+        st.info("Aucune position fermée pour le moment.")
+
+# =============================
+# TAB 4: VUE PAR CRYPTO
+# =============================
+with tab4:
     st.subheader("🔍 Analyse par Crypto")
 
     if not df.empty:
@@ -1143,9 +1486,9 @@ with tab3:
         st.info("Aucune donnée disponible")
 
 # =============================
-# TAB 4: STATISTIQUES
+# TAB 5: STATISTIQUES
 # =============================
-with tab4:
+with tab5:
     st.subheader("📉 Statistiques de Trading")
 
     if trading_stats:
@@ -1289,6 +1632,6 @@ with tab4:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #6b7280; font-size: 0.85rem; padding: 1rem;'>
-    Dashboard Crypto Portfolio v2.0 | Données mises à jour en temps réel
+    Dashboard Crypto Portfolio v2.1 | Données mises à jour en temps réel
 </div>
 """, unsafe_allow_html=True)
