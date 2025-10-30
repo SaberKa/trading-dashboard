@@ -583,49 +583,62 @@ def calculate_bh_evolution(trades_df: pd.DataFrame, realized_pnl: pd.DataFrame) 
 
 
 # =============================
-# Buy & Hold Comparison
+# Buy & Hold Comparison (CORRIGÉ)
 # =============================
-def calculate_buy_and_hold(trades_df: pd.DataFrame, open_positions_enriched: pd.DataFrame) -> dict:
+def calculate_buy_and_hold(trades_df: pd.DataFrame) -> dict:
     """
-    Calcule la performance Buy & Hold basée sur les positions actuellement ouvertes.
-    C'est la comparaison la plus pertinente : "Si j'avais gardé mes positions ouvertes depuis l'achat"
+    Calcule la performance Buy & Hold basée sur TOUS les achats historiques.
+    Simulation: "Si j'avais acheté et JAMAIS vendu, quelle serait ma performance?"
     """
-    if open_positions_enriched.empty:
+    if trades_df.empty:
         return {"total_cost": 0, "total_value": 0, "total_pnl": 0, "total_pct": 0, "per_symbol": {}}
 
-    # Filtrer les positions avec prix actuel disponible
-    valid_positions = open_positions_enriched[open_positions_enriched["current_price"].notna()].copy()
+    # Récupérer TOUS les achats (même ceux qui ont été vendus)
+    all_buys = trades_df[trades_df["action"] == "buy"].copy()
 
-    if valid_positions.empty:
+    if all_buys.empty:
         return {"total_cost": 0, "total_value": 0, "total_pnl": 0, "total_pct": 0, "per_symbol": {}}
 
-    total_cost = float(valid_positions["cost_$"].sum())
-    total_value = float(valid_positions["value_$"].sum())
+    total_cost = 0
+    total_value = 0
+    per_symbol = {}
+
+    # Grouper par symbole
+    for symbol in all_buys["symbol"].unique():
+        symbol_buys = all_buys[all_buys["symbol"] == symbol]
+
+        # Somme de toutes les quantités et coûts
+        total_qty = symbol_buys["quantity"].sum()
+        symbol_cost = (symbol_buys["quantity"] * symbol_buys["price"]).sum()
+
+        # Prix actuel
+        current_price = price_cache.get_with_fallback(symbol)
+
+        if current_price is not None and symbol_cost > 0:
+            symbol_value = total_qty * current_price
+            symbol_pnl = symbol_value - symbol_cost
+            symbol_pct = (symbol_pnl / symbol_cost * 100)
+
+            total_cost += symbol_cost
+            total_value += symbol_value
+
+            per_symbol[symbol] = {
+                "cost": float(symbol_cost),
+                "value": float(symbol_value),
+                "pnl": float(symbol_pnl),
+                "pct": float(symbol_pct),
+                "quantity": float(total_qty),
+                "current_price": float(current_price)
+            }
+
     total_pnl = total_value - total_cost
     total_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
 
-    # Par symbole
-    per_symbol = {}
-    for symbol in valid_positions["symbol"].unique():
-        symbol_data = valid_positions[valid_positions["symbol"] == symbol]
-        cost = float(symbol_data["cost_$"].sum())
-        value = float(symbol_data["value_$"].sum())
-        pnl = value - cost
-        pct = (pnl / cost * 100) if cost > 0 else 0
-
-        per_symbol[symbol] = {
-            "cost": cost,
-            "value": value,
-            "pnl": pnl,
-            "pct": pct,
-            "current_price": float(symbol_data["current_price"].iloc[0])
-        }
-
     return {
-        "total_cost": total_cost,
-        "total_value": total_value,
-        "total_pnl": total_pnl,
-        "total_pct": total_pct,
+        "total_cost": float(total_cost),
+        "total_value": float(total_value),
+        "total_pnl": float(total_pnl),
+        "total_pct": float(total_pct),
         "per_symbol": per_symbol
     }
 
@@ -724,7 +737,7 @@ with st.spinner("Calcul des métriques..."):
 
     open_positions_enriched = enrich_with_live_prices(open_positions)
     trading_stats = calculate_trading_stats(realized_pnl)
-    buy_hold_stats = calculate_buy_and_hold(df, open_positions_enriched)
+    buy_hold_stats = calculate_buy_and_hold(df)  # CORRIGÉ: prend maintenant tous les achats
     bh_evolution = calculate_bh_evolution(df, realized_pnl)
 
 # Debug des quantités recalculées
@@ -896,14 +909,14 @@ with tab1:
         st.caption("""
         📌 **Légende:**
         - 🔵 **Trading Actif**: Votre stratégie avec achats/ventes
-        - 🟡 **Buy & Hold**: Si vous aviez gardé tous vos achats sans jamais vendre
+        - 🟡 **Buy & Hold**: Si vous aviez gardé TOUS vos achats sans JAMAIS vendre
         """)
 
     # Comparaison avec Buy & Hold
     st.markdown("---")
     st.subheader("🔄 Comparaison avec Buy & Hold")
     st.caption(
-        "Comparaison entre votre stratégie de trading et une stratégie Buy & Hold passive sur les positions ouvertes")
+        "Comparaison entre votre stratégie de trading et une stratégie Buy & Hold passive (garder tous les achats)")
 
     col1, col2, col3 = st.columns(3)
 
@@ -1632,6 +1645,6 @@ with tab5:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #6b7280; font-size: 0.85rem; padding: 1rem;'>
-    Dashboard Crypto Portfolio v2.1 | Données mises à jour en temps réel
+    Dashboard Crypto Portfolio v2.2 | Buy & Hold calculé sur tous les achats historiques
 </div>
 """, unsafe_allow_html=True)
